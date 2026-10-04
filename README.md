@@ -46,11 +46,43 @@ Solar panel ─► INA219 (0x40) ─► CN3791 MPPT charger ─► LiPo battery 
 | 1-cell LiPo, 2000 mAh | |
 | SSD1306 OLED 128×64 | I²C 0x3C |
 
-## Setup
-1. In the Arduino IDE, install the ESP32 board package and these libraries: **Adafruit INA219**, **Adafruit SSD1306**, **Adafruit GFX**, **ArduinoJson**.
-2. Open `firmware/solar_microgrid_monitor/solar_microgrid_monitor.ino`.
-3. Set your Wi-Fi SSID and password, Firebase host, and database secret at the top of the file.
-4. Upload it, then open the IP address shown on the OLED or in the Serial Monitor (115200 baud).
+## How to implement
+
+**1. Wire the hardware**
+- **I²C bus:** connect every module's SDA → **GPIO 21** and SCL → **GPIO 22**, VCC → **3.3 V**, and GND → **GND** (common).
+- **Battery INA219:** bridge its **A0** pad so its address becomes **0x41**. Leave the solar INA219 at 0x40.
+- **Power path:**
+  - Solar panel **+** → solar INA219 **VIN+**; **VIN−** → CN3791 **solar input +**.
+  - CN3791 **BAT+** → LiPo **+**.
+  - LiPo **+** → battery INA219 **VIN+**; **VIN−** → load **+**.
+  - Panel, CN3791, LiPo and load negatives all go to common GND.
+- Set the CN3791's charge current to about **1 A** to match `CHARGING_CURRENT_MA`, and its MPPT voltage to suit your panel.
+
+**2. Set up the Arduino IDE**
+- Install the **esp32 by Espressif** board package. Boards Manager URL: `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
+- Library Manager: install **Adafruit INA219**, **Adafruit SSD1306**, **Adafruit GFX**, and **ArduinoJson** (v6 or newer).
+
+**3. Create the Firebase database (optional)**
+- In the Firebase console, create a project → **Realtime Database** → start in test mode.
+- Copy the database URL **without** `https://` into `firebaseHost`.
+- Project settings → Service accounts → **Database secrets** → copy the secret into `firebaseAuth`.
+- Skip this section to run the dashboard locally only. The upload just fails silently.
+
+**4. Configure and upload**
+- Open `firmware/solar_microgrid_monitor/solar_microgrid_monitor.ino`.
+- Set `ssid` and `password`, plus `BATTERY_CAPACITY_MAH`, `SOLAR_PANEL_MAX_VOLTAGE` and `CHARGING_CURRENT_MA` for your parts.
+- Select **ESP32 Dev Module** and the correct port, then upload.
+
+**5. Check it works**
+- In the Serial Monitor at **115200** baud, both INA219s should be reported as found.
+- The OLED shows the IP address. Open `http://<that-ip>` on the same Wi-Fi to see the dashboard.
+- Put the panel in sunlight. Solar power should rise, and the battery should show as charging.
+
+**Troubleshooting**
+- *"INA219 not found":* check SDA/SCL, the 3.3 V supply, and the A0 bridge on the battery sensor. Run an I²C scanner sketch; you should see 0x3C, 0x40 and 0x41.
+- *Blank OLED:* some modules use address **0x3D**; change `OLED_ADDRESS`.
+- *Readings stuck at zero:* the current must flow **through** VIN+ → VIN− of each INA219.
+- *No Firebase data:* the host must not include `https://`, and the database rules must allow writes.
 
 ## Endpoints
 | Route | Returns |
