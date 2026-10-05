@@ -80,7 +80,7 @@ struct SensorData {
 struct BatteryHealth {
   float voltageMin = 4.2;
   float voltageMax = 3.0;
-  float lastSOC = 100;
+  float lastSOC = -1;              // -1 until the first reading
   float totalChargeAh = 0;
   float totalDischargeAh = 0;
   unsigned long lastUpdate = 0;
@@ -712,7 +712,8 @@ void readSensors() {
   // ===== Battery State Calculations =====
   currentData.battSOC = calculateSOC(currentData.battVoltage);
   currentData.battSOH = calculateSOH();
-  currentData.battEfficiency = calculateBatteryEfficiency(currentData.battCurrent);
+  // INA219 #2 sits between battery and load, so positive current = discharge
+  currentData.battEfficiency = calculateBatteryEfficiency(-currentData.battCurrent);
 
   // ===== Charging Detection =====
   // CN3791 is charging if solar power > 0 and battery not full
@@ -722,11 +723,13 @@ void readSensors() {
     // Estimate charging power (solar power minus losses)
     currentData.chargingPower = currentData.solarPower * 0.95;  // 95% efficiency
 
-    // Estimate time to full charge
-    float remainingCapacity = (100 - currentData.battSOC) / 100.0 * BATTERY_CAPACITY_MAH;
-    if (currentData.solarCurrent > 0) {
-      currentData.chargeTimeRemaining = (remainingCapacity / currentData.solarCurrent) * 60;  // minutes
-    }
+    // Estimate time to full charge from the battery-side charge current
+    float remainingCapacity = (100 - currentData.battSOC) / 100.0 * BATTERY_CAPACITY_MAH;  // mAh
+    float chargeCurrent = (currentData.battVoltage > 3.0)
+                            ? currentData.chargingPower / currentData.battVoltage * 1000.0  // mA
+                            : 0;
+    if (chargeCurrent > CHARGING_CURRENT_MA) chargeCurrent = CHARGING_CURRENT_MA;            // CN3791 limit
+    currentData.chargeTimeRemaining = (chargeCurrent > 0) ? remainingCapacity / chargeCurrent * 60 : 0;  // minutes
   } else {
     currentData.chargingPower = 0;
     currentData.chargeTimeRemaining = 0;
@@ -851,34 +854,28 @@ void updateBatteryHealth() {
   unsigned long now = millis();
   if (battHealth.lastUpdate > 0) {
     float hours = (now - battHealth.lastUpdate) / 3600000.0;
-    float ah = abs(currentData.battCurrent) / 1000.0 * hours;
-    currentData.totalAh += ah;
 
-    // Separate charge and discharge tracking
-    if (currentData.battCurrent > 0) {
-      battHealth.totalChargeAh += ah;
-    } else {
-      battHealth.totalDischargeAh += ah;
-    }
+    // Discharge: measured by INA219 #2 (positive current = battery -> load)
+    float dischargeAh = (currentData.battCurrent > 0) ? currentData.battCurrent / 1000.0 * hours : 0;
+    // Charge: estimated from CN3791 output power (no sensor on the charge path)
+    float chargeAh = (currentData.isCharging && currentData.battVoltage > 3.0)
+                       ? currentData.chargingPower / currentData.battVoltage * hours : 0;
+
+    battHealth.totalDischargeAh += dischargeAh;
+    battHealth.totalChargeAh += chargeAh;
+    currentData.totalAh += dischargeAh + chargeAh;
   }
   battHealth.lastUpdate = now;
 
-  // Cycle counting (simplified)
-  // Full cycle = 80% SOC swing
-  if (battHealth.lastSOC >= 80 && currentData.battSOC <= 20) {
-    currentData.cycleCount += 0.5;
-    battHealth.fullCharges++;
-  } else if (battHealth.lastSOC <= 20 && currentData.battSOC >= 80) {
-    currentData.cycleCount += 0.5;
+  // Cycle counting from SOC throughput: a 100% swing down and back up = 1 cycle.
+  // Counted in 2% increments so voltage noise does not inflate the count.
+  if (battHealth.lastSOC < 0) battHealth.lastSOC = currentData.battSOC;   // first reading
+  float socChange = fabs(currentData.battSOC - battHealth.lastSOC);
+  if (socChange >= 2.0) {
+    currentData.cycleCount += socChange / 200.0;
+    if (currentData.battSOC >= 99.0 && battHealth.lastSOC < 99.0) battHealth.fullCharges++;
+    battHealth.lastSOC = currentData.battSOC;
   }
-
-  // Incremental cycle counting for partial cycles
-  float socChange = abs(currentData.battSOC - battHealth.lastSOC);
-  if (socChange > 10) {  // More than 10% change
-    currentData.cycleCount += socChange / 200.0;  // 100% = 0.5 cycle
-  }
-
-  battHealth.lastSOC = currentData.battSOC;
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -1004,16 +1001,16 @@ void sendToFirebase() {
   HTTPClient http;
 
   // Create JSON document
-  StaticJsonDocument<768> doc;
+  JsonDocument doc;
   doc["timestamp"] = millis();
   doc["uptime"] = (millis() - systemStartTime) / 1000;  // seconds
 
-  JsonObject solar = doc.createNestedObject("solar");
+  JsonObject solar = doc["solar"].to<JsonObject>();
   solar["voltage"] = currentData.solarVoltage;
   solar["current"] = currentData.solarCurrent;
   solar["power"] = currentData.solarPower;
 
-  JsonObject battery = doc.createNestedObject("battery");
+  JsonObject battery = doc["battery"].to<JsonObject>();
   battery["voltage"] = currentData.battVoltage;
   battery["current"] = currentData.battCurrent;
   battery["power"] = currentData.battPower;
@@ -1022,22 +1019,22 @@ void sendToFirebase() {
   battery["efficiency"] = currentData.battEfficiency;
   battery["isCharging"] = currentData.isCharging;
 
-  JsonObject mppt = doc.createNestedObject("mppt");
+  JsonObject mppt = doc["mppt"].to<JsonObject>();
   mppt["efficiency"] = currentData.mpptEfficiency;
   mppt["tracking"] = currentData.mpptTracking;
   mppt["mppVoltage"] = currentData.mpptVoltage;
   mppt["chargingPower"] = currentData.chargingPower;
 
-  JsonObject system = doc.createNestedObject("system");
+  JsonObject system = doc["system"].to<JsonObject>();
   system["efficiency"] = currentData.sysEfficiency;
 
-  JsonObject health = doc.createNestedObject("health");
+  JsonObject health = doc["health"].to<JsonObject>();
   health["cycles"] = currentData.cycleCount;
   health["totalAh"] = currentData.totalAh;
   health["chargeAh"] = battHealth.totalChargeAh;
   health["dischargeAh"] = battHealth.totalDischargeAh;
 
-  JsonObject metrics = doc.createNestedObject("metrics");
+  JsonObject metrics = doc["metrics"].to<JsonObject>();
   metrics["solarEnergy"] = currentData.solarEnergyTotal;
   metrics["peakSolar"] = currentData.peakSolarPower;
   metrics["maxMPPPower"] = mpptData.maxPower;
@@ -1072,7 +1069,7 @@ void handleRoot() {
 }
 
 void handleData() {
-  StaticJsonDocument<512> doc;
+  JsonDocument doc;
 
   doc["solarVoltage"] = currentData.solarVoltage;
   doc["solarCurrent"] = currentData.solarCurrent;
