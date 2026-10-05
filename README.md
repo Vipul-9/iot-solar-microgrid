@@ -60,7 +60,7 @@ Solar panel ─► INA219 (0x40) ─► CN3791 MPPT charger ─► LiPo battery 
 
 **2. Set up the Arduino IDE**
 - Install the **esp32 by Espressif** board package. Boards Manager URL: `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
-- Library Manager: install **Adafruit INA219**, **Adafruit SSD1306**, **Adafruit GFX**, and **ArduinoJson** (v6 or newer).
+- Library Manager: install **Adafruit INA219**, **Adafruit SSD1306**, **Adafruit GFX**, and **ArduinoJson** v7.
 
 **3. Create the Firebase database (optional)**
 - In the Firebase console, create a project → **Realtime Database** → start in test mode.
